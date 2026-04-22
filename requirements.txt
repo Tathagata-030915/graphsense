@@ -1,0 +1,14 @@
+torch>=2.1.0
+torch-geometric
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+wandb
+fastapi
+uvicorn
+gradio
+kaggle
+tqdm
+scipy
