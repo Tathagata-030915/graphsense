@@ -72,7 +72,32 @@ def test_features():
     print(f"\n✅ Feature test passed. Shape: {feature_df.shape}, "
           f"Anomaly rate: {labels.mean()*100:.2f}%")
 
+def test_baselines():
+    from src.pipeline.loader import load_skab
+    from src.pipeline.features import create_windows
+    from src.models.baselines import IsolationForestBaseline
+    from sklearn.model_selection import train_test_split
+
+    df = load_skab()
+    feature_df, labels = create_windows(df)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        feature_df, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+
+    iso = IsolationForestBaseline(contamination=0.30)
+    iso.fit(X_train, y_train)
+    preds  = iso.predict(X_test)
+    scores = iso.anomaly_scores(X_test)
+
+    assert len(preds) == len(y_test)
+    assert set(preds).issubset({0, 1})
+    assert len(scores) == len(y_test)
+    print(f"[IsoForest] Test anomaly pred rate: {preds.mean()*100:.2f}%")
+    print("\n✅ Baseline tests passed.")
+
 
 if __name__ == "__main__":
     test_loader()
     test_features()
+    test_baselines()
