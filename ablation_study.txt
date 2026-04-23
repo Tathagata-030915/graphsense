@@ -1,0 +1,47 @@
+Running ablation study... (this takes ~10-15 min)
+=======================================================
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.3
+[graph] Avg edges per graph: 5.51 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  Recon only      | F1 = 0.4667
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.3
+[graph] Avg edges per graph: 5.51 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  Classify only   | F1 = 0.5793
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.3
+[graph] Avg edges per graph: 5.51 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  Dual head       | F1 = 0.5611
+
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.1
+[graph] Avg edges per graph: 18.27 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  threshold=0.1     | F1 = 0.6108
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.2
+[graph] Avg edges per graph: 10.54 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  threshold=0.2     | F1 = 0.5484
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.3
+[graph] Avg edges per graph: 5.51 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  threshold=0.3     | F1 = 0.5901
+[graph] Built 4,595 graphs
+[graph] Node feature shape : (8 sensors x 9 features)
+[graph] Adj matrix shape   : (8 x 8), threshold=0.5
+[graph] Avg edges per graph: 1.51 (excl. self-loops)
+  [ablation] ds size=4595, max train_idx=4594, max test_idx=4584
+  threshold=0.5     | F1 = 0.5914
+
+✅ Ablation study complete.
