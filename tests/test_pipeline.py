@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+import numpy as np
 
 # Make sure src/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -96,8 +97,36 @@ def test_baselines():
     print(f"[IsoForest] Test anomaly pred rate: {preds.mean()*100:.2f}%")
     print("\n✅ Baseline tests passed.")
 
+def test_graph_builder():
+    from src.pipeline.loader import load_skab
+    from src.pipeline.features import create_windows
+    from src.pipeline.graph_builder import build_graph_dataset, adjacency_to_edge_index
+
+    df = load_skab()
+    feature_df, labels = create_windows(df)
+    node_features_list, adj_list, labels_out = build_graph_dataset(feature_df, labels)
+
+    assert len(node_features_list) == len(adj_list) == len(labels_out)
+    assert len(node_features_list) == 4595
+
+    sample_adj  = adj_list[0]
+    sample_node = node_features_list[0]
+
+    assert sample_adj.shape  == (8, 8), f"Bad adj shape: {sample_adj.shape}"
+    assert sample_node.shape == (8, 9), f"Bad node shape: {sample_node.shape}"
+    assert (np.diag(sample_adj) == 1.0).all(), "Self-loops missing"
+    assert not np.isnan(sample_node).any(), "NaN in node features"
+
+    edge_index, edge_weight = adjacency_to_edge_index(sample_adj)
+    assert edge_index.shape[0] == 2
+    assert len(edge_weight) == edge_index.shape[1]
+
+    print(f"\n✅ Graph builder test passed.")
+    print(f"   Graphs: {len(adj_list):,} | Nodes: 8 | Node features: 9")
+
 
 if __name__ == "__main__":
     test_loader()
     test_features()
     test_baselines()
+    test_graph_builder()

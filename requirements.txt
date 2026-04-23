@@ -12,3 +12,4 @@ gradio
 kaggle
 tqdm
 scipy
+pyarrow
