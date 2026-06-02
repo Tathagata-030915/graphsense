@@ -189,7 +189,7 @@ print(f"   pos_weight for focal loss: {pos_weight:.4f}")
 # ============================================================
 # CELL 6 — DEVICE + run_epoch
 # ============================================================
-from src.models.gat_model import GraphSenseGAT, DualLoss
+from src.models.gat_model_focal_loss_v2 import GraphSenseGAT, DualLoss
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CLASSIFY_THRESHOLD = 0.35   # tuned from ablation — use consistently everywhere
