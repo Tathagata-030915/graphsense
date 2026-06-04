@@ -1,4 +1,8 @@
-# src/models/gat_model.py
+# src/models/gat_model_focal_loss_v2.py
+#
+# v3 changes:
+#   IN_FEATURES: 9 → 13  (matches new node feature count in graph_builder.py)
+#   Everything else unchanged
 
 import torch
 import torch.nn as nn
@@ -8,12 +12,11 @@ from torch_geometric.nn import GATConv, global_mean_pool
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-IN_FEATURES   = 9     # per-node input features (7 stat + 2 freq)
+IN_FEATURES   = 13    # per-node input features (7 stat + 2 freq + 4 extended)
 HIDDEN_DIM    = 64    # hidden dimension for GAT layers
 NUM_HEADS     = 4     # attention heads in GATConv
 DROPOUT       = 0.3   # dropout rate
-ALPHA         = 0.0   # joint loss weight: α*L_recon + (1-α)*L_classify
-                      # alpha=0.0 → classify only (optimal from ablation)
+ALPHA         = 0.0   # alpha=0.0 → classify only (optimal from ablation)
 
 
 # ── GAT Model ─────────────────────────────────────────────────────────────────
@@ -23,15 +26,18 @@ class GraphSenseGAT(nn.Module):
     Dual-head Graph Attention Network for IoT anomaly detection.
 
     Architecture:
-        GATConv(9 → 64, heads=4)         # Layer 1: multi-head attention
+        GATConv(13 → 64, heads=4)         # Layer 1: multi-head attention
         GATConv(256 → 64, heads=1)        # Layer 2: single-head refinement
         GlobalMeanPool                    # Graph-level embedding (64,)
-            ├── Reconstruction head       # Decoder MLP → (8 × 9,) → MSE loss
-            └── Classification head      # Linear → sigmoid → BCE loss
+            ├── Reconstruction head       # Decoder MLP → (8 × 13,) → MSE loss
+            └── Classification head      # MLP → sigmoid → BCE/Focal loss
 
     KEY NOVELTY: graph structure (edge_index, edge_weight) is recomputed per
     window from Pearson correlations — dynamic graphs. GAT attention then
     further weights these edges per node. Two levels of adaptive weighting.
+
+    v3: IN_FEATURES increased from 9 → 13 to include zcr, rms,
+        autocorr_lag1, iqr. Reconstruction head output updated accordingly.
     """
 
     def __init__(
@@ -43,10 +49,11 @@ class GraphSenseGAT(nn.Module):
     ):
         super().__init__()
 
-        self.dropout = dropout
+        self.dropout    = dropout
+        self.in_features = in_features
 
         # ── GAT Layer 1 ───────────────────────────────────────────────────
-        # in_features=9, out per head=hidden_dim, heads=4
+        # in_features=13, out per head=hidden_dim, heads=4
         # Output shape per node: num_heads * hidden_dim = 4 * 64 = 256
         self.gat1 = GATConv(
             in_channels  = in_features,
@@ -69,17 +76,16 @@ class GraphSenseGAT(nn.Module):
 
         # ── Reconstruction Head ───────────────────────────────────────────
         # Takes graph embedding (64,) → reconstructs all node features
-        # Target shape: (n_nodes * in_features,) = (8 * 9,) = (72,)
+        # Target shape: (n_nodes * in_features,) = (8 * 13,) = (104,)
         self.recon_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 2, 8 * in_features),   # 8 nodes × 9 features
+            nn.Linear(hidden_dim * 2, 8 * in_features),   # 8 nodes × 13 features
         )
 
         # ── Classification Head ───────────────────────────────────────────
         # Takes graph embedding (64,) → binary anomaly logit
-        # Expanded with BatchNorm for more stable training
         self.classify_head = nn.Sequential(
             nn.Linear(hidden_dim, 64),
             nn.BatchNorm1d(64),
@@ -94,14 +100,14 @@ class GraphSenseGAT(nn.Module):
         """
         Parameters
         ----------
-        x           : Tensor (total_nodes, 9)     — node features
+        x           : Tensor (total_nodes, 13)    — node features
         edge_index  : Tensor (2, total_edges)     — edge connectivity
         edge_weight : Tensor (total_edges,)       — correlation weights
         batch       : Tensor (total_nodes,)       — graph assignment per node
 
         Returns
         -------
-        recon_out   : Tensor (batch_size, 72)     — reconstructed node features
+        recon_out   : Tensor (batch_size, 104)    — reconstructed node features
         classify_out: Tensor (batch_size, 1)      — anomaly logits (pre-sigmoid)
         """
 
@@ -136,63 +142,26 @@ class FocalLoss(nn.Module):
 
     FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
 
-    Where:
-        p_t   = sigmoid(logit) for positive class, 1 - sigmoid(logit) for negative
-        gamma = focusing parameter — down-weights easy examples
-                gamma=0 → standard BCE; gamma=2 → standard focal loss default
-        alpha_t = class balance weight (pos_weight for anomaly class)
-
-    Why focal loss over weighted BCE:
-        Weighted BCE scales all anomaly losses by a constant.
-        Focal loss ADDITIONALLY suppresses easy normal examples,
-        forcing the model to focus on hard-to-classify samples.
-        This is exactly what we need: the model currently predicts
-        normal correctly for the easy cases but fails on ambiguous windows.
-
-    Parameters
-    ----------
-    gamma    : float  — focusing parameter (default 2.0, tune if needed)
-    pos_weight: float — weight for positive (anomaly) class
-                        computed as n_normal / n_anomaly from training set
+    gamma=1.0, pos_weight=n_normal/n_anomaly * 0.5 — tuned from v2 runs.
     """
 
-    def __init__(self, gamma: float = 2.0, pos_weight: float = 1.0):
+    def __init__(self, gamma: float = 1.0, pos_weight: float = 1.0):
         super().__init__()
         self.gamma      = gamma
         self.pos_weight = pos_weight
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        logits  : Tensor (batch_size,) — raw logits (pre-sigmoid)
-        targets : Tensor (batch_size,) — 0/1 labels
-
-        Returns
-        -------
-        loss    : scalar Tensor
-        """
-        # Clamp for numerical stability
         probs    = torch.sigmoid(logits)
         probs    = probs.clamp(min=1e-7, max=1 - 1e-7)
 
-        # Standard BCE per sample (unreduced)
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets, reduction="none"
         )
 
-        # p_t: probability of the TRUE class
-        p_t = probs * targets + (1 - probs) * (1 - targets)
-
-        # Focal weight: (1 - p_t)^gamma
-        # When model is confident and correct → p_t high → weight near 0
-        # When model is wrong or uncertain → p_t low → weight near 1
+        p_t          = probs * targets + (1 - probs) * (1 - targets)
         focal_weight = (1 - p_t) ** self.gamma
-
-        # Apply class weight to positive samples only
-        alpha_t = self.pos_weight * targets + (1 - targets)
-
-        focal_loss = alpha_t * focal_weight * bce_loss
+        alpha_t      = self.pos_weight * targets + (1 - targets)
+        focal_loss   = alpha_t * focal_weight * bce_loss
 
         return focal_loss.mean()
 
@@ -201,43 +170,27 @@ class FocalLoss(nn.Module):
 
 class DualLoss(nn.Module):
     """
-    Joint loss combining reconstruction (unsupervised) and
-    classification (supervised) objectives.
-
     L_total = alpha * L_recon + (1 - alpha) * L_classify
-
-    alpha=1.0  → pure reconstruction (unsupervised ablation)
-    alpha=0.0  → pure classification (supervised, optimal from ablation)
-    alpha=0.5  → balanced dual head
-
-    Classification loss uses FocalLoss when pos_weight > 1.0,
-    otherwise falls back to plain BCEWithLogitsLoss.
-
-    Parameters
-    ----------
-    alpha      : float — reconstruction vs classification weight
-    pos_weight : float — anomaly class weight for focal loss
-                         pass n_normal / n_anomaly from your training split
-    gamma      : float — focal loss focusing parameter
+    alpha=0.0 → classify only (optimal from ablation study)
     """
 
     def __init__(
         self,
         alpha      : float = ALPHA,
         pos_weight : float = 1.0,
-        gamma      : float = 2.0,
+        gamma      : float = 1.0,
     ):
         super().__init__()
-        self.alpha      = alpha
-        self.mse        = nn.MSELoss()
-        self.focal      = FocalLoss(gamma=gamma, pos_weight=pos_weight)
+        self.alpha = alpha
+        self.mse   = nn.MSELoss()
+        self.focal = FocalLoss(gamma=gamma, pos_weight=pos_weight)
 
     def forward(
         self,
-        recon_out    : torch.Tensor,   # (batch_size, 72)
+        recon_out    : torch.Tensor,   # (batch_size, 104)
         classify_out : torch.Tensor,   # (batch_size, 1)
-        node_targets : torch.Tensor,   # (batch_size, 72) — flattened input
-        labels       : torch.Tensor,   # (batch_size,)    — 0/1
+        node_targets : torch.Tensor,   # (batch_size, 104)
+        labels       : torch.Tensor,   # (batch_size,)
     ):
         l_recon    = self.mse(recon_out, node_targets)
         l_classify = self.focal(classify_out.squeeze(-1), labels.float())
@@ -245,10 +198,9 @@ class DualLoss(nn.Module):
         return l_total, l_recon, l_classify
 
 
-# ── Sanity Check (run this cell on Kaggle to verify model loads) ──────────────
+# ── Sanity Check ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Fake a single batch of 2 graphs, each with 8 nodes
     batch_size = 2
     n_nodes    = 8
     n_edges    = 10
@@ -260,16 +212,16 @@ if __name__ == "__main__":
     labels      = torch.tensor([0, 1], dtype=torch.float)
 
     model   = GraphSenseGAT()
-    loss_fn = DualLoss(alpha=0.0, pos_weight=2.3, gamma=2.0)
+    loss_fn = DualLoss(alpha=0.0, pos_weight=1.14, gamma=1.0)
 
     recon, classify = model(x, edge_index, edge_weight, batch)
 
-    node_targets = x.view(batch_size, -1)   # (2, 72)
+    node_targets = x.view(batch_size, -1)   # (2, 104)
     loss, l_r, l_c = loss_fn(recon, classify, node_targets, labels)
 
-    print(f"recon shape    : {recon.shape}")       # (2, 72)
+    print(f"recon shape    : {recon.shape}")       # (2, 104)
     print(f"classify shape : {classify.shape}")    # (2, 1)
     print(f"loss           : {loss.item():.4f}")
     print(f"  L_recon      : {l_r.item():.4f}")
     print(f"  L_classify   : {l_c.item():.4f}")
-    print("✅ GAT model sanity check passed.")
+    print("✅ GAT model v3 sanity check passed.")

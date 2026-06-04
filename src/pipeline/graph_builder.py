@@ -1,4 +1,9 @@
 # src/pipeline/graph_builder.py
+#
+# v3 changes:
+#   node_feature_suffixes expanded from 9 → 13 entries
+#   Added: _zcr, _rms, _autocorr_lag1, _iqr
+#   Print statement updated to reflect new shape (8 x 13)
 
 import numpy as np
 import pandas as pd
@@ -71,7 +76,7 @@ def build_graph_dataset(
     """
     Converts the full feature DataFrame into a list of graph objects.
     Each window becomes one graph with:
-        - Node features : 9 features per sensor (7 stat + 2 freq)
+        - Node features : 13 features per sensor (7 stat + 2 freq + 4 extended)
         - Adjacency matrix : dynamic, correlation-based
         - Label : 0 or 1
 
@@ -83,23 +88,37 @@ def build_graph_dataset(
 
     Returns
     -------
-    node_features_list : List of np.ndarray, each shape (n_sensors, n_node_features)
+    node_features_list : List of np.ndarray, each shape (n_sensors, 13)
     adj_list           : List of np.ndarray, each shape (n_sensors, n_sensors)
     labels             : np.ndarray of shape (n_windows,)
     """
     node_features_list = []
     adj_list           = []
 
-    # Features per sensor node: 7 statistical + 2 frequency = 9
+    # Features per sensor node: 7 statistical + 2 frequency + 4 extended = 13
+    # ORDER MATTERS — must match IN_FEATURES=13 in gat_model_focal_loss_v2.py
+    # Do NOT reorder these without updating IN_FEATURES
     node_feature_suffixes = [
-        "_mean", "_std", "_min", "_max",
-        "_skew", "_kurtosis", "_slope",
-        "_dominant_freq", "_spectral_energy",
+        # Original 9
+        "_mean",
+        "_std",
+        "_min",
+        "_max",
+        "_skew",
+        "_kurtosis",
+        "_slope",
+        "_dominant_freq",
+        "_spectral_energy",
+        # New 4
+        "_zcr",           # zero/mean-crossing rate — oscillation frequency
+        "_rms",           # root mean square energy — absolute magnitude
+        "_autocorr_lag1", # lag-1 autocorrelation — temporal predictability
+        "_iqr",           # interquartile range — robust spread
     ]
 
     for idx, row in feature_df.iterrows():
         # ── Build node feature matrix ──────────────────────────────────────
-        # Shape: (n_sensors=8, n_node_features=9)
+        # Shape: (n_sensors=8, n_node_features=13)
         node_feats = np.zeros(
             (len(SENSOR_COLUMNS), len(node_feature_suffixes)),
             dtype=np.float32
@@ -119,7 +138,7 @@ def build_graph_dataset(
         adj_list.append(adj)
 
     print(f"[graph] Built {len(node_features_list):,} graphs")
-    print(f"[graph] Node feature shape : (8 sensors x 9 features)")
+    print(f"[graph] Node feature shape : (8 sensors x 13 features)")
     print(f"[graph] Adj matrix shape   : (8 x 8), threshold={threshold}")
     print(f"[graph] Avg edges per graph: {_avg_edges(adj_list):.2f} "
           f"(excl. self-loops)")
@@ -133,7 +152,6 @@ def _avg_edges(adj_list: List[np.ndarray]) -> float:
     """Compute average number of non-self-loop edges across all graphs."""
     total = 0
     for adj in adj_list:
-        # Count upper triangle edges above 0 (excl diagonal)
         mask  = np.triu(np.ones_like(adj, dtype=bool), k=1)
         total += int((adj[mask] != 0).sum())
     return total / max(len(adj_list), 1)
@@ -149,7 +167,7 @@ def adjacency_to_edge_index(adj: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     edge_index  : np.ndarray of shape (2, n_edges) — [source, target] pairs
     edge_weight : np.ndarray of shape (n_edges,)   — correlation weights
     """
-    rows, cols = np.where(adj != 0)
+    rows, cols  = np.where(adj != 0)
     edge_index  = np.stack([rows, cols], axis=0)
     edge_weight = adj[rows, cols]
     return edge_index, edge_weight

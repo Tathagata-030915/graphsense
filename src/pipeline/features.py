@@ -1,4 +1,9 @@
 # src/pipeline/features.py
+#
+# v3 changes:
+#   Added 4 new per-sensor features: zcr, rms, autocorr_lag1, iqr
+#   Node features per sensor: 9 → 13
+#   IN_FEATURES in gat_model_focal_loss_v2.py must be updated to 13
 
 import numpy as np
 import pandas as pd
@@ -52,6 +57,66 @@ def _frequency_features(window: np.ndarray, col: str) -> dict:
     return {
         f"{col}_dominant_freq"   : dominant_freq,
         f"{col}_spectral_energy" : spectral_energy,
+    }
+
+
+# ── NEW: Extended Features ─────────────────────────────────────────────────────
+
+def _extended_features(window: np.ndarray, col: str) -> dict:
+    """
+    Compute 4 additional features per sensor window.
+
+    Features added:
+    ──────────────────────────────────────────────────────────────
+    zcr (zero-crossing rate):
+        How often the signal crosses its mean.
+        High ZCR → rapid oscillation (often seen in vibration anomalies).
+        We use mean-crossing not zero-crossing because sensor signals
+        are not zero-centered — mean-crossing is more meaningful.
+
+    rms (root mean square):
+        sqrt(mean(x^2)) — captures signal energy/magnitude.
+        Differs from std because it captures absolute magnitude,
+        not just spread. A shifted anomaly (constant offset) has
+        high RMS but similar std to normal — std misses it, RMS catches it.
+
+    autocorr_lag1 (autocorrelation at lag 1):
+        Pearson correlation of the signal with itself shifted by 1 step.
+        Normal sensor readings are often autocorrelated (smooth trends).
+        Anomalies often break this autocorrelation suddenly.
+        Range: [-1, 1]. Values near 0 = unpredictable/chaotic signal.
+
+    iqr (interquartile range):
+        Q75 - Q25. Robust spread measure unlike std/range which
+        are sensitive to outliers. Captures the "typical" spread
+        of the middle 50% of readings. Anomalies often inflate IQR
+        even when std is not extreme.
+    ──────────────────────────────────────────────────────────────
+    """
+    # Zero-crossing rate (mean-crossing)
+    mean_centered = window - np.mean(window)
+    zcr = float(np.sum(np.diff(np.sign(mean_centered)) != 0)) / len(window)
+
+    # RMS energy
+    rms = float(np.sqrt(np.mean(window ** 2)))
+
+    # Autocorrelation at lag 1
+    if len(window) > 1 and np.std(window) > 0:
+        # Pearson correlation between x[t] and x[t+1]
+        autocorr_lag1 = float(np.corrcoef(window[:-1], window[1:])[0, 1])
+        if np.isnan(autocorr_lag1):
+            autocorr_lag1 = 0.0
+    else:
+        autocorr_lag1 = 0.0
+
+    # IQR
+    iqr = float(np.percentile(window, 75) - np.percentile(window, 25))
+
+    return {
+        f"{col}_zcr"           : zcr,
+        f"{col}_rms"           : rms,
+        f"{col}_autocorr_lag1" : autocorr_lag1,
+        f"{col}_iqr"           : iqr,
     }
 
 
@@ -129,7 +194,7 @@ def create_windows(
 
             features = {}
 
-            # Per-sensor statistical + frequency features
+            # Per-sensor statistical + frequency + extended features
             for col in SENSOR_COLUMNS:
                 window_vals = window_df[col].values.astype(np.float64)
 
@@ -139,14 +204,15 @@ def create_windows(
 
                 features.update(_statistical_features(window_vals, col))
                 features.update(_frequency_features(window_vals, col))
+                features.update(_extended_features(window_vals, col))  # NEW
 
-            # Cross-sensor correlation features
+            # Cross-sensor correlation features (used for edges, not node features)
             features.update(_correlation_features(window_df))
 
             # Metadata (not used in model, useful for debugging)
-            features["file_id"]    = file_id
+            features["file_id"]      = file_id
             features["window_start"] = start
-            features["scenario"]   = window_df["scenario"].iloc[0]
+            features["scenario"]     = window_df["scenario"].iloc[0]
 
             all_features.append(features)
             all_labels.append(_extract_label(window_df))
@@ -163,6 +229,7 @@ def create_windows(
     print(f"[features] Feature columns : {len(feature_cols)}")
     print(f"[features] Anomaly rate    : {labels.mean()*100:.2f}%")
     print(f"[features] Meta columns    : {meta_cols}")
+    print(f"[features] Node features per sensor: 13 (was 9)")
 
     return feature_df, labels
 
